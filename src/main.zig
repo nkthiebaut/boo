@@ -371,6 +371,7 @@ test {
     _ = @import("paths.zig");
     _ = @import("keys.zig");
     _ = @import("pty.zig");
+    _ = @import("altscreen.zig");
     _ = @import("window.zig");
     _ = @import("daemon.zig");
     _ = @import("client.zig");
