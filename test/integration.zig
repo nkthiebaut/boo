@@ -6,6 +6,7 @@
 const std = @import("std");
 const posix = std.posix;
 const build_options = @import("build_options");
+const vt = @import("ghostty-vt");
 
 const exe_path: []const u8 = build_options.exe_path;
 
@@ -1000,4 +1001,485 @@ test "agent loop: new, send, wait, peek, kill" {
 
     try h.runOk(&.{ "kill", "agent" });
     try h.runExit(&.{ "peek", "agent" }, 3);
+}
+
+test "rename: moves a session to a new name" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("before", &.{"cat"});
+    try h.sendLine("before", "RN-MARK");
+    const seeded = try h.waitPeekContains("before", "RN-MARK");
+    alloc.free(seeded);
+
+    // The screen and the running process survive the rename.
+    try h.runOk(&.{ "rename", "before", "after" });
+    const content = try h.waitPeekContains("after", "RN-MARK");
+    alloc.free(content);
+    try h.runExit(&.{ "peek", "before" }, 3);
+
+    // Name collisions, invalid names, and missing sessions are
+    // rejected with the documented exit codes.
+    try h.startDetached("other", &.{"cat"});
+    try h.runExit(&.{ "rename", "after", "other" }, 1);
+    try h.runExit(&.{ "rename", "after", "sp ace" }, 2);
+    try h.runExit(&.{ "rename", "nosuchzz", "x" }, 3);
+    try h.runExit(&.{"rename"}, 2);
+    try h.runExit(&.{ "rename", "after" }, 2);
+}
+
+// -- boo ui -------------------------------------------------------------------
+
+fn uiSessionCount(h: *Harness) !usize {
+    const result = try h.run(&.{ "ls", "--json" });
+    defer h.alloc.free(result.stdout);
+    defer h.alloc.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) return error.LsFailed;
+    var parsed = try std.json.parseFromSlice(std.json.Value, h.alloc, result.stdout, .{});
+    defer parsed.deinit();
+    return parsed.value.array.items.len;
+}
+
+fn waitUiSessionCount(h: *Harness, want: usize) !void {
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        if (try uiSessionCount(h) == want) return;
+        try deadline.tick("session count never settled");
+    }
+}
+
+/// Render raw client output through a terminal emulator and return
+/// the resulting screen text, one line per row. Raw byte matching
+/// cannot tell whether content survives on screen (a later erase can
+/// remove it); this can.
+fn renderScreen(
+    alloc: std.mem.Allocator,
+    bytes: []const u8,
+    rows: u16,
+    cols: u16,
+) ![]const u8 {
+    var term = try vt.Terminal.init(alloc, .{ .cols = cols, .rows = rows });
+    defer term.deinit(alloc);
+    var stream = term.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(bytes);
+    return term.screens.active.dumpStringAlloc(alloc, .{ .screen = .{} });
+}
+
+test "ui: sidebar lists sessions and the focused session renders in the viewport" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("aa", &.{"cat"});
+    try h.startDetached("bb", &.{"cat"});
+    try h.sendLine("bb", "BB-VIEW-MARK");
+    const seeded = try h.waitPeekContains("bb", "BB-VIEW-MARK");
+    alloc.free(seeded);
+
+    // bb saw input last, so it is the most recent session and the UI
+    // focuses it on startup.
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("aa");
+    try ui.waitFor("bb");
+    try ui.waitFor("+ new session");
+    try ui.waitFor("BB-VIEW-MARK");
+
+    // The UI renders on the alternate screen, like attach.
+    try std.testing.expect(std.mem.indexOf(u8, ui.output.items, "\x1b[?1049h") != null);
+
+    // C-a p focuses the previous (other) session; typing lands there.
+    ui.clearOutput();
+    try ui.send("\x01p");
+    try ui.send("AA-TYPED-MARK\r");
+    try ui.waitFor("AA-TYPED-MARK");
+    const peeked = try h.waitPeekContains("aa", "AA-TYPED-MARK");
+    defer alloc.free(peeked);
+}
+
+test "ui: dragging in the viewport selects text and copies it via osc 52" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("cp", &.{"cat"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("+ new session");
+
+    // The echoed line lands on the session's first row, rendered at
+    // screen row 1 starting at column 26 (24-column sidebar plus the
+    // separator).
+    try h.sendLine("cp", "COPYTEXT");
+    try ui.waitFor("COPYTEXT");
+
+    // Press on the C, drag right, release on the final T. cat never
+    // asked for mouse reporting, so the UI selects instead of
+    // forwarding, then copies as OSC 52 with base64("COPYTEXT").
+    ui.clearOutput();
+    try ui.send("\x1b[<0;26;1M");
+    try ui.send("\x1b[<32;30;1M");
+    try ui.send("\x1b[<32;33;1M");
+    try ui.send("\x1b[<0;33;1m");
+    try ui.waitFor("\x1b]52;c;Q09QWVRFWFQ=");
+    try ui.waitFor("copied");
+}
+
+test "ui: mouse events forward natively when the application asks for them" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // The session enables button tracking + SGR before the UI
+    // attaches, so the attach replay must carry the modes to the
+    // view terminal. cat -v makes the forwarded bytes visible.
+    try h.startDetached("fwd", &.{
+        "sh",                                                                                "-c",
+        "stty -echo -icanon; printf '\\033[?1002h\\033[?1006h'; echo RAWREADY; exec cat -v",
+    });
+    const seeded = try h.waitPeekContains("fwd", "RAWREADY");
+    alloc.free(seeded);
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("RAWREADY");
+
+    // A click at screen (30, 3) is viewport cell (4, 2); the app gets
+    // SGR press + release with viewport-relative coordinates instead
+    // of a UI selection.
+    try ui.send("\x1b[<0;30;3M\x1b[<0;30;3m");
+    try ui.waitFor("^[[<0;5;3M^[[<0;5;3m");
+}
+
+test "ui: a row touching the viewport's right edge keeps its last cell" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("edge", &.{"sh"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("+ new session");
+
+    // Paint a marker whose final cell sits in the session's last
+    // column (75 wide inside a 100-column UI), which lands in the
+    // last column of the whole terminal. The marker is assembled
+    // from a variable so the echoed command line cannot match.
+    try h.sendLine("edge", "T=EDGE; printf \"\\\\033[3;71H${T}Z\"");
+    try ui.waitFor("EDGEZ");
+    // The status bar repaints after arming the prefix, so once the
+    // keybind bar shows, the marker row's frame is fully captured.
+    try ui.send("\x01");
+    try ui.waitFor("r rename");
+    try ui.send("\x1b");
+
+    // Erase-to-EOL emitted after a full-width row would eat the last
+    // cell (the cursor rests on it in the pending-wrap state), so the
+    // marker must survive on the rendered screen, not just in the
+    // byte stream.
+    const screen = try renderScreen(alloc, ui.output.items, 24, 100);
+    defer alloc.free(screen);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "EDGEZ") != null);
+
+    // The sidebar separates the new-session button from the first
+    // session row with a blank gap row.
+    var lines = std.mem.splitScalar(u8, screen, '\n');
+    _ = lines.next(); // button row
+    const gap = lines.next().?;
+    try std.testing.expect(std.mem.startsWith(u8, gap, " " ** 24 ++ "\u{2502}"));
+    const first = lines.next().?;
+    try std.testing.expect(std.mem.indexOf(u8, first, "edge") != null);
+}
+
+test "ui: the empty state shows the ghost and the keybind hint" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("(o o)");
+    try ui.waitFor("no sessions");
+    try ui.waitFor("Press Ctrl+A for Keybinds");
+}
+
+test "ui: clicking a session in the sidebar focuses it" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("one", &.{"cat"});
+    try h.startDetached("two", &.{"cat"});
+    try h.sendLine("one", "ONE-MARK");
+    try h.sendLine("two", "TWO-MARK");
+    const seeded = try h.waitPeekContains("two", "TWO-MARK");
+    alloc.free(seeded);
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("TWO-MARK"); // most recent session focused
+
+    // Sessions are sorted by name: "one" on sidebar row 3 (1-based,
+    // under the button and its gap row). An SGR press + release on
+    // that row switches the viewport.
+    ui.clearOutput();
+    try ui.send("\x1b[<0;5;3M\x1b[<0;5;3m");
+    try ui.waitFor("ONE-MARK");
+}
+
+test "ui: create and kill sessions from the ui" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("keep1", &.{"cat"});
+    try h.startDetached("keep2", &.{"cat"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("keep2");
+
+    // Clicking '+ new session' (the top sidebar row) creates a
+    // session (named after the cwd or the creating pid) and focuses
+    // it.
+    try ui.send("\x1b[<0;5;1M\x1b[<0;5;1m");
+    try waitUiSessionCount(&h, 3);
+
+    // C-a k asks for confirmation, then kills the focused (new)
+    // session.
+    try ui.send("\x01k");
+    try ui.waitFor("? y/n");
+    try ui.send("y");
+    try waitUiSessionCount(&h, 2);
+
+    // The pre-existing sessions survived.
+    const ls = try h.run(&.{"ls"});
+    defer alloc.free(ls.stdout);
+    defer alloc.free(ls.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "keep1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "keep2") != null);
+}
+
+test "ui: clicking the kill target asks for confirmation" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("victim", &.{"cat"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("victim");
+
+    // The kill target is the 'x' in the second-to-last sidebar
+    // column (sidebar width 24 -> 1-based column 23), row 3.
+    try ui.send("\x1b[<0;23;3M\x1b[<0;23;3m");
+    try ui.waitFor("kill victim? y/n");
+    try ui.send("y");
+    try waitUiSessionCount(&h, 0);
+}
+
+test "ui: quit with C-a d leaves sessions running and restores the terminal" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("survivor", &.{"cat"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("survivor");
+
+    try ui.send("\x01d");
+    try ui.waitFor("[boo ui closed]");
+    try std.testing.expectEqual(@as(u32, 0), try ui.waitExit());
+
+    // The alternate screen is left before the exit notice prints.
+    const leave = std.mem.lastIndexOf(u8, ui.output.items, "\x1b[?1049l").?;
+    const notice = std.mem.indexOf(u8, ui.output.items, "[boo ui closed]").?;
+    try std.testing.expect(leave < notice);
+
+    const ls = try h.run(&.{"ls"});
+    defer alloc.free(ls.stdout);
+    defer alloc.free(ls.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "survivor") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "detached") != null);
+}
+
+test "ui: viewport size tracks the terminal minus the sidebar" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("rz", &.{"/bin/sh"});
+
+    // 100 columns - 24 sidebar - 1 separator = 75 viewport columns;
+    // 24 rows - 1 status bar = 23 viewport rows.
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("rz");
+
+    const size_file = try std.fmt.allocPrint(alloc, "{s}/ui-size.txt", .{h.dir});
+    defer alloc.free(size_file);
+    const cmd = try std.fmt.allocPrint(alloc, "stty size > {s}", .{size_file});
+    defer alloc.free(cmd);
+
+    try h.sendLine("rz", cmd);
+    try waitFileEquals(alloc, size_file, "23 75\n");
+
+    // Resizing the outer terminal resizes the viewport with it.
+    try ui.setSize(30, 120);
+    var deadline = Deadline.init(default_timeout_ms);
+    while (true) {
+        try h.sendLine("rz", cmd);
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+        const content = std.fs.cwd().readFileAlloc(alloc, size_file, 4096) catch "";
+        defer if (content.len > 0) alloc.free(content);
+        if (std.mem.eql(u8, content, "29 95\n")) break;
+        try deadline.tick("viewport resize never reached the session");
+    }
+}
+
+test "ui: a plain attach steals the focused session" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("st", &.{"cat"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("st");
+
+    var thief = try PtyClient.spawn(&h, &.{ "attach", "st" }, 24, 80);
+    defer thief.deinit();
+    try ui.waitFor("attached elsewhere");
+
+    // Clicking the session in the sidebar steals it back.
+    try ui.send("\x1b[<0;5;3M\x1b[<0;5;3m");
+    try thief.waitFor("attached elsewhere");
+    _ = try thief.waitExit();
+}
+
+test "ui: startup leaves a session attached elsewhere alone until it frees up" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("ns", &.{"cat"});
+
+    var holder = try PtyClient.spawn(&h, &.{ "attach", "ns" }, 24, 80);
+    defer holder.deinit();
+    try h.sendLine("ns", "HELD-MARK");
+    try holder.waitFor("HELD-MARK");
+
+    // The UI starts while another client holds the session: it points
+    // at the session without stealing it.
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("attached elsewhere");
+    try ui.waitFor("click the session to take it over");
+    try std.testing.expect(std.mem.indexOf(u8, holder.output.items, "attached elsewhere") == null);
+
+    // Once the holder detaches, the UI binds the session by itself.
+    try holder.send("\x01d");
+    try holder.waitFor("[detached from ns]");
+    _ = try holder.waitExit();
+    try h.sendLine("ns", "FREED-MARK");
+    try ui.waitFor("FREED-MARK");
+}
+
+test "ui: a stolen view reclaims the session once the thief lets go" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("rc", &.{"cat"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try h.sendLine("rc", "FIRST-MARK");
+    try ui.waitFor("FIRST-MARK");
+
+    var thief = try PtyClient.spawn(&h, &.{ "attach", "rc" }, 24, 80);
+    defer thief.deinit();
+    try ui.waitFor("attached elsewhere");
+
+    // The thief detaches; the UI re-attaches on its own.
+    try thief.send("\x01d");
+    try thief.waitFor("[detached from rc]");
+    _ = try thief.waitExit();
+    try h.sendLine("rc", "BACK-MARK");
+    try ui.waitFor("BACK-MARK");
+}
+
+test "ui: the status bar reveals keybinds and C-a r renames" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("oldname", &.{"cat"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("oldname");
+    try ui.waitFor("Keybinds: Ctrl+A");
+
+    // Arming the prefix swaps the hint for the keybind list; Esc
+    // backs out and the hint returns.
+    try ui.send("\x01");
+    try ui.waitFor("r rename");
+    try ui.waitFor("esc cancel");
+    ui.clearOutput();
+    try ui.send("\x1b");
+    try ui.waitFor("Keybinds: Ctrl+A");
+
+    // C-a r opens the prompt pre-filled with the old name; erase it
+    // and type a new one.
+    try ui.send("\x01r");
+    try ui.waitFor("rename oldname:");
+    try ui.send("\x7f\x7f\x7f\x7f\x7f\x7f\x7f");
+    try ui.send("fresh\r");
+    try ui.waitFor("renamed oldname to fresh");
+
+    // The daemon moved with the name: the old one is gone and the
+    // sidebar lists the new one.
+    const ls = try h.run(&.{"ls"});
+    defer alloc.free(ls.stdout);
+    defer alloc.free(ls.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "fresh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls.stdout, "oldname") == null);
+}
+
+test "ui: session titles render in the sidebar" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    try h.startDetached("titled", &.{"/bin/sh"});
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("titled");
+
+    // Set the window title via OSC 2. The marker is assembled from a
+    // variable so the echoed command line cannot match the wait.
+    try h.sendLine("titled", "T=TITLE; printf \"\\033]2;${T}-MARK\\007\"");
+    try ui.waitFor("TITLE-MARK");
+}
+
+test "ui without a tty fails cleanly" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    const result = try h.run(&.{"ui"});
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    try std.testing.expect(result.term == .Exited and result.term.Exited == 1);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "requires a terminal") != null);
 }

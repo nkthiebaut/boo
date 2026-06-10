@@ -27,11 +27,13 @@ pub const overview =
     \\commands:
     \\  new [name] [-d] [-- cmd...]  start a session (attach unless -d)
     \\  attach, at <name>            attach a session (steals politely)
+    \\  ui                           manage sessions in a full-screen UI
     \\  ls [--json]                  list sessions
     \\  send <name> [flags]          type into a session
     \\  peek <name>                  print the session's screen
     \\  wait <name>                  block until output matches or settles
     \\  kill <name | --all>          end a session, or all of them
+    \\  rename <name> <new-name>     rename a session
     \\  version                      print the version
     \\  help [command | topic]       this overview, or detailed help
     \\
@@ -103,6 +105,46 @@ pub const commands = [_]Entry{
         \\examples:
         \\  boo attach build     reattach "build"
         \\  boo at bu            the same, by prefix
+        \\
+        ,
+    },
+    .{
+        .name = "ui",
+        .body =
+        \\usage: boo ui
+        \\
+        \\Manage sessions in a full-screen interface: a sidebar lists
+        \\every session (window title underneath) and the focused
+        \\session runs in a viewport on the right, rendered live from
+        \\terminal state.
+        \\
+        \\mouse:
+        \\  click a session     focus it (steals politely, like attach)
+        \\  click its 'x'       kill it (asks for confirmation)
+        \\  click + new session start a session running $SHELL
+        \\  scroll the sidebar  scroll the session list
+        \\  in the viewport     forwarded to the application when it
+        \\                      asked for mouse reporting; otherwise
+        \\                      dragging selects text and copies it on
+        \\                      release (OSC 52)
+        \\
+        \\keys (prefix C-a, control variants match GNU screen):
+        \\  C-a c   create a session and focus it
+        \\  C-a k   kill the focused session (asks y/n)
+        \\  C-a r   rename the focused session
+        \\  C-a n   focus the next session
+        \\  C-a p   focus the previous session
+        \\  C-a C-a focus the previously focused session
+        \\  C-a d   quit the UI (sessions keep running)
+        \\  C-a l   redraw
+        \\  C-a a   send a literal C-a to the application
+        \\  C-a Esc cancel the armed prefix
+        \\
+        \\Pressing C-a alone lists these bindings in the bottom bar.
+        \\
+        \\Everything else is typed into the focused session. Unlike a
+        \\plain attach, pasted text may contain C-a bytes safely
+        \\(bracketed paste).
         \\
         ,
     },
@@ -208,6 +250,20 @@ pub const commands = [_]Entry{
         ,
     },
     .{
+        .name = "rename",
+        .body =
+        \\usage: boo rename <name> <new-name>
+        \\
+        \\Rename a session. The running program is unaffected and an
+        \\attached client stays attached. The old name accepts a
+        \\unique prefix, like attach.
+        \\
+        \\example:
+        \\  boo rename work api-server
+        \\
+        ,
+    },
+    .{
         .name = "version",
         .body =
         \\usage: boo version
@@ -243,6 +299,9 @@ pub const topics = [_]Entry{
         \\Control variants match GNU screen: C-a C-d detaches and
         \\C-a C-l redraws. Detaching leaves the session running;
         \\'boo attach' brings it back.
+        \\
+        \\'boo ui' adds bindings for managing sessions; see
+        \\'boo help ui'.
         \\
         ,
     },

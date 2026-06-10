@@ -15,6 +15,10 @@ exactly as a human would see it.
 
 - Sessions that survive disconnects: detach with `C-a d`, reattach with
   `boo attach`.
+- A full-screen session manager: `boo ui` lists sessions in a sidebar
+  with their titles, and renders the focused one next to it. Click to
+  switch, create, kill, or rename sessions; drag to select and copy
+  text (OSC 52); everything also works from the keyboard.
 - One command per session, named after your current directory by
   default. Sessions are cheap; run one per task.
 - Faithful redraws from libghostty terminal state, including SGR styles,
@@ -63,9 +67,11 @@ automatically (pinned in `build.zig.zon`).
 boo new                    # new session running $SHELL, attached
 boo new work               # named session
 boo new work -d -- make    # create detached, running a command
+boo ui                     # manage sessions in a full-screen UI
 boo ls                     # list sessions
 boo attach work            # reattach (steals if attached elsewhere)
 boo at w                   # same: alias + unique-prefix matching
+boo rename work api        # rename a session
 boo kill work              # end a session
 boo kill --all             # end every session
 ```
@@ -86,6 +92,11 @@ Bindings follow GNU screen's defaults, including the `C-x` variants
 | `C-a d`, `C-a C-d` | detach                     |
 | `C-a l`, `C-a C-l` | redraw                     |
 | `C-a a`   | send a literal `C-a`                |
+
+`boo ui` adds bindings for switching (`C-a n`/`C-a p`/`C-a C-a`),
+creating (`C-a c`), killing (`C-a k`), and renaming (`C-a r`)
+sessions; pressing `C-a` alone lists them in the bottom bar. See
+`boo help ui`.
 
 ## Automation
 
@@ -149,11 +160,12 @@ your terminal <-(raw tty)-> boo client <-(unix socket)-> session daemon
 This is a young project, not a drop-in GNU screen replacement:
 
 - One attached client per session (attaching steals); no `-x` sharing.
-- One window per session: no splits, tabs, or window juggling. Run one
-  session per task instead.
+- One window per session: no splits or tabs inside a session. Run one
+  session per task and juggle them with `boo ui`.
 - The `C-a` prefix is not yet configurable, and pasted bytes containing
-  `0x01` are interpreted as the prefix (GNU screen has the same quirk).
-- No status line, monitoring, copy mode, or split regions yet.
+  `0x01` are interpreted as the prefix (GNU screen has the same quirk;
+  `boo ui` is immune thanks to bracketed paste).
+- No status line, monitoring, or copy mode yet.
 - Sessions run with `TERM=xterm-256color`.
 
 ## License
