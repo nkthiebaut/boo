@@ -9,7 +9,7 @@
 
 Sessions that haunt your terminal.
 
-[Install](#install) | [Usage](#usage) | [Automation](#automation) | [Architecture](#architecture)
+[Install](#install) | [Usage](#usage) | [Automation](#automation) | [Why](#why-boo) | [Architecture](#architecture)
 
 [![ci](https://github.com/coder/boo/actions/workflows/ci.yml/badge.svg)](https://github.com/coder/boo/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/coder/boo)](https://github.com/coder/boo/releases/latest)
@@ -114,6 +114,25 @@ boo kill build                         # 5. clean up
   session, `4` wait timed out.
 
 See `boo help automation` for the full page.
+
+## Why boo?
+
+GNU screen works the same way boo does, architecturally: it parses all
+output through its own built-in terminal emulator and redraws from
+that state on reattach. But that emulator is decades old and lags far
+behind what modern programs emit. Whatever it doesn't understand gets
+dropped or mangled on redraw. boo swaps that layer for `libghostty-vt`,
+Ghostty's VT core, so the saved state matches what your terminal would
+actually display, and terminal queries are answered while detached so
+TUIs don't hang unattended.
+
+Scripting is the other win: `send`, `peek --json`, and
+`wait --text`/`--idle` instead of `-X stuff`, hardcopy files, and
+sleep loops.
+
+tmux is great, it just solves a different problem. boo keeps screen's
+model by design: sessions, a prefix key, and nothing else to learn.
+One session per task, with `boo ui` to juggle them.
 
 ## Contributing
 
