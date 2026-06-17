@@ -22,6 +22,12 @@ pub const MsgType = enum(u8) {
     resize = 3,
     detach_req = 4,
     command = 5,
+    /// Marks this connection as a `boo ui` view. Sent right before the
+    /// attach so the daemon replays scrollback history on attach. A
+    /// daemon from before this message existed ignores the unknown type
+    /// and simply attaches the view with no history, so a new ui client
+    /// stays compatible with an already-running older daemon.
+    ui = 6,
 
     // Daemon to client.
     output = 64,

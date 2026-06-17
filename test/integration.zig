@@ -2628,3 +2628,61 @@ test "ui without a tty fails cleanly" {
     try std.testing.expect(result.term == .Exited and result.term.Exited == 1);
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "requires a terminal") != null);
 }
+
+test "ui: attaching replays a session's pre-existing scrollback history" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // Seed far more output than the screen is tall, so the earliest
+    // lines scroll into the daemon window's history BEFORE any ui
+    // attaches. A fresh ui view's terminal starts empty and cannot
+    // rebuild this from the live screen, so the daemon must replay the
+    // history on attach for a wheel-up to page it.
+    try h.startDetached("hist", &.{"sh"});
+    try h.sendLine("hist", "i=1; while [ $i -le 60 ]; do printf 'HIST-%03d\\n' $i; i=$((i+1)); done");
+    const seeded = try h.waitPeekContains("hist", "HIST-060");
+    alloc.free(seeded);
+
+    // The ui attaches after the history already exists and focuses the
+    // only session; its repaint reproduces the live screen (HIST-060).
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("HIST-060");
+
+    // HIST-001 scrolled off the live screen, so it renders only if the
+    // daemon replayed history into the view. Wheel up over the viewport
+    // pages it in; over-scrolling clamps at the top.
+    ui.clearOutput();
+    for (0..40) |_| try ui.send("\x1b[<64;50;10M");
+    try ui.waitFor(" scrollback");
+    try ui.waitFor("HIST-001");
+}
+
+test "plain attach replays the visible screen only, never scrollback history" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // Same seeding: HIST-001 scrolls off the live screen. A plain attach
+    // is raw passthrough to the user's real terminal, where a history
+    // dump would spam their screen, so it must receive only the visible
+    // screen, never the scrolled-off history a ui view gets.
+    try h.startDetached("plain", &.{"sh"});
+    try h.sendLine("plain", "i=1; while [ $i -le 60 ]; do printf 'HIST-%03d\\n' $i; i=$((i+1)); done");
+    const seeded = try h.waitPeekContains("plain", "HIST-060");
+    alloc.free(seeded);
+
+    var client = try PtyClient.spawn(&h, &.{ "attach", "plain" }, 24, 80);
+    defer client.deinit();
+    // The repaint reproduces the visible screen, ending at HIST-060.
+    try client.waitFor("HIST-060");
+    // The daemon sends any history before the repaint, so if it had been
+    // (wrongly) sent it would already be here alongside HIST-060. The
+    // off-screen line must be absent.
+    try std.testing.expect(std.mem.indexOf(u8, client.output.items, "HIST-001") == null);
+
+    try client.send("\x01d");
+    try client.waitFor("detached from plain");
+    _ = try client.waitExit();
+}
