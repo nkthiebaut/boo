@@ -728,12 +728,15 @@ pub const View = struct {
         self.stream = .initAlloc(alloc, handler);
         errdefer self.stream.deinit();
 
-        try protocol.writeMsg(sock, .attach, &(protocol.AttachPayload{
+        // Mark this connection as a ui view before attaching, so the
+        // daemon replays scrollback history on attach. A ui view renders
+        // from terminal state, so it can take the replay and page it on
+        // a wheel-up. An older daemon ignores the unknown `.ui` message
+        // and just attaches with no history.
+        try protocol.writeMsg(sock, .ui, "");
+        try protocol.writeMsg(sock, .attach, &(protocol.SizePayload{
             .rows = @max(rows, 1),
             .cols = @max(cols, 1),
-            // A ui view renders from terminal state, so it can take a
-            // scrollback-history replay and page it on a wheel-up.
-            .ui = true,
         }).encode());
 
         return self;
