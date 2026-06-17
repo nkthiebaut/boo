@@ -79,6 +79,8 @@ pub const commands = [_]Entry{
         \\  --rows N        initial terminal height (default 24); the
         \\                  next attach resizes to the real terminal
         \\  --cols N        initial terminal width (default 80)
+        \\  --cwd DIR       run the command in DIR instead of the
+        \\                  current directory (must already exist)
         \\
         \\examples:
         \\  boo new                      interactive shell, attach now
@@ -137,7 +139,8 @@ pub const commands = [_]Entry{
         \\                      release (OSC 52)
         \\
         \\keys (prefix C-a, control variants match GNU screen):
-        \\  C-a c   create a session and focus it
+        \\  C-a c   create a session and focus it; it starts in the
+        \\          focused session's working directory
         \\  C-a k   kill the focused session (asks y/n)
         \\  C-a r   rename the focused session
         \\  C-a g   go to a session by name (best match)
