@@ -159,12 +159,16 @@ fn resolveSession(
 
 pub const SessionInfo = struct {
     /// Full info payload:
-    /// name \t Attached|Detached \t idle_ms \t out_idle_ms \t title.
+    /// name \t Attached|Detached \t idle_ms \t out_idle_ms \t waiting \t title.
     text: []u8,
     attached: bool,
     idle_ms: i64,
     /// Time since the window last produced output; drives wait --idle.
     out_idle_ms: i64,
+    /// The window rang the bell and has had no input since: a generic
+    /// "waiting for input" signal the ui marks. Defaults false against
+    /// an older daemon whose info reply predates the field.
+    waiting: bool,
     /// Window title; slices into `text`.
     title: []const u8,
 };
@@ -188,12 +192,23 @@ pub fn sessionInfo(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) 
         return error.BadResponse;
     const out_idle_ms = std.fmt.parseInt(i64, it.next() orelse return error.BadResponse, 10) catch
         return error.BadResponse;
-    const title = it.rest();
+    // The remainder is either `waiting \t title` (current daemon) or
+    // just `title` (a daemon predating the field). The title is
+    // tab-free, so a tab in the remainder unambiguously separates an
+    // optional waiting flag from the title; without one it is all title.
+    const rest = it.rest();
+    var waiting = false;
+    var title = rest;
+    if (std.mem.indexOfScalar(u8, rest, '\t')) |tab| {
+        waiting = std.mem.eql(u8, rest[0..tab], "1");
+        title = rest[tab + 1 ..];
+    }
     return .{
         .text = result.text,
         .attached = attached,
         .idle_ms = idle_ms,
         .out_idle_ms = out_idle_ms,
+        .waiting = waiting,
         .title = title,
     };
 }
@@ -437,9 +452,10 @@ fn cmdLs(alloc: std.mem.Allocator, args: []const [:0]const u8) !void {
             if (i > 0) try out.append(alloc, ',');
             try out.appendSlice(alloc, "{\"name\":");
             try appendJsonString(alloc, &out, entry.name);
-            const tail = try std.fmt.allocPrint(alloc, ",\"attached\":{},\"idle_ms\":{d},\"title\":", .{
+            const tail = try std.fmt.allocPrint(alloc, ",\"attached\":{},\"idle_ms\":{d},\"waiting\":{},\"title\":", .{
                 entry.info.attached,
                 entry.info.idle_ms,
+                entry.info.waiting,
             });
             defer alloc.free(tail);
             try out.appendSlice(alloc, tail);

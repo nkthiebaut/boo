@@ -126,6 +126,12 @@ pub const commands = [_]Entry{
         \\session runs in a viewport on the right, rendered live from
         \\terminal state.
         \\
+        \\sidebar markers (left of the name):
+        \\  ●  waiting for input: the session rang the bell (an agent
+        \\     finishing a turn or asking a question) and nothing has
+        \\     been typed since. Clears on the next input.
+        \\  *  attached by another client
+        \\
         \\mouse:
         \\  click a session     focus it (steals politely, like attach)
         \\  click its 'x'       kill it (asks for confirmation)
@@ -190,7 +196,9 @@ pub const commands = [_]Entry{
         \\
         \\flags:
         \\  --json  emit a JSON array:
-        \\          [{"name","attached","idle_ms","title"}]
+        \\          [{"name","attached","idle_ms","waiting","title"}]
+        \\          ("waiting" is true when the session rang the bell
+        \\          and has had no input since)
         \\
         ,
     },
@@ -371,7 +379,9 @@ pub const topics = [_]Entry{
         \\  control keys; stdin mode is binary safe.
         \\
         \\machine-readable output:
-        \\  boo ls --json    [{"name","attached","idle_ms","title"}]
+        \\  boo ls --json    [{"name","attached","idle_ms","waiting",
+        \\                    "title"}] ("waiting" flags a session that
+        \\                    rang the bell and has had no input since)
         \\  boo peek --json  {"session","title","rows","cols",
         \\                    "cursor":{"row","col"},"screen"}
         \\
