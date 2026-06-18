@@ -3524,7 +3524,7 @@ const Ui = struct {
     // Split around the two prefix-dependent bindings (focus-last and
     // literal-send) so they can be rendered with the configured prefix.
     const keybind_bar_head =
-        " c new  | vsplit  - split  arrows pane  o next pane  x close pane  k kill  r rename  g goto  n/p switch  up/dn browse  lt/rt resize  s sidebar  d quit  ";
+        " c new  |- split  o/x pane  k kill  r rename  n/p switch  up/dn browse  lt/rt resize  d quit  ";
     const keybind_bar_tail = "  l redraw  esc cancel";
 
     /// Status content overlaid full-width on the last screen row
