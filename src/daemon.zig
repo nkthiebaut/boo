@@ -401,13 +401,17 @@ pub const Daemon = struct {
                 @max(0, now - w.last_output_ms)
             else
                 0;
+            // The window rang the bell and has had no input since: a
+            // generic "waiting for input" signal the ui marks.
+            const waiting: bool = if (self.liveWindow()) |w| w.waiting else false;
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(self.alloc);
-            try out.print(self.alloc, "{s}\t{s}\t{d}\t{d}\t", .{
+            try out.print(self.alloc, "{s}\t{s}\t{d}\t{d}\t{d}\t", .{
                 self.opts.name,
                 if (attached) "Attached" else "Detached",
                 idle,
                 out_idle,
+                @intFromBool(waiting),
             });
             // Window title last; sanitized, so it cannot contain the
             // tabs that separate the fields.

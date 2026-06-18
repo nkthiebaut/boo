@@ -841,6 +841,10 @@ pub const Entry = struct {
     name: []u8,
     attached: bool,
     idle_ms: i64,
+    /// The session rang the bell and has had no input since: the
+    /// program (often a coding agent) is waiting for input. Shown as a
+    /// marker on the session's name row.
+    waiting: bool = false,
     /// Owned by the list; control bytes are stripped by the daemon
     /// but the title may contain any UTF-8 text.
     title: []u8,
@@ -859,6 +863,10 @@ fn freeEntries(alloc: std.mem.Allocator, entries: *std.ArrayList(Entry)) void {
 const sgr_reset = "\x1b[0m";
 const style_selected = "\x1b[7m";
 const style_dim = "\x1b[2m";
+/// Bold yellow, for the "waiting for input" marker on a session row.
+const style_waiting = "\x1b[1;33m";
+/// The one-column glyph marking a session that is waiting for input.
+const waiting_marker = "\u{25CF}"; // ●
 
 /// Display width in terminal columns of one codepoint: 0 for
 /// combining and other zero-width marks, 2 for East Asian wide and
@@ -985,10 +993,23 @@ pub fn appendSessionRow(
     if (width == 0) return;
     if (selected) try out.appendSlice(alloc, style_selected);
 
-    // '*': attached by another client. The selected session is
-    // attached by this UI itself, which is not worth a marker.
-    const marker: u8 = if (!selected and entry.attached) '*' else ' ';
-    try out.append(alloc, marker);
+    // The leading status column, always exactly one display cell:
+    //   ●  (bold yellow) the program rang the bell and is waiting for input
+    //   *               attached by another client
+    //   (space)         idle. The selected session is attached by this UI
+    //                   itself, which is not worth a '*' marker.
+    // Waiting takes priority: a session that needs you matters more than
+    // who is holding it.
+    if (entry.waiting) {
+        try out.appendSlice(alloc, style_waiting);
+        try out.appendSlice(alloc, waiting_marker);
+        try out.appendSlice(alloc, sgr_reset);
+        // Restore the row highlight the marker's reset cleared.
+        if (selected) try out.appendSlice(alloc, style_selected);
+    } else {
+        const marker: u8 = if (!selected and entry.attached) '*' else ' ';
+        try out.append(alloc, marker);
+    }
 
     if (width >= 12) {
         // "<m><name...> x ": kill target in the last columns.
@@ -2120,6 +2141,7 @@ const Ui = struct {
                 .name = try self.alloc.dupe(u8, name),
                 .attached = info.attached,
                 .idle_ms = info.idle_ms,
+                .waiting = info.waiting,
                 .title = try self.alloc.dupe(u8, info.title),
             });
         }
@@ -4199,6 +4221,40 @@ test "sidebar session row is exactly the requested width" {
     try appendSessionRow(alloc, &out, entry, 24, true);
     try std.testing.expect(std.mem.startsWith(u8, out.items, style_selected));
     try std.testing.expect(std.mem.indexOf(u8, out.items, ">") == null);
+}
+
+test "sidebar marks a session that is waiting for input" {
+    const alloc = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+
+    var name_buf: [8]u8 = "work1234".*;
+    var title_buf: [0]u8 = .{};
+    // Attached elsewhere AND waiting at once, to prove waiting wins.
+    const entry: Entry = .{
+        .name = &name_buf,
+        .attached = true,
+        .idle_ms = 0,
+        .waiting = true,
+        .title = &title_buf,
+    };
+
+    // The marker is one display cell (the ● glyph), so the row is still
+    // exactly 24 columns: 1 marker + 20 name + 3 " x ".
+    try appendSessionRow(alloc, &out, entry, 24, false);
+    const expected = style_waiting ++ waiting_marker ++ sgr_reset ++
+        "work1234" ++ (" " ** 12) ++ " x " ++ sgr_reset;
+    try std.testing.expectEqualStrings(expected, out.items);
+    // Waiting takes priority over the attached-elsewhere '*' marker.
+    try std.testing.expect(std.mem.indexOfScalar(u8, out.items, '*') == null);
+
+    // Selected: the marker's SGR reset must not drop the row highlight,
+    // so the inverse style is re-applied right after the marker.
+    out.clearRetainingCapacity();
+    try appendSessionRow(alloc, &out, entry, 24, true);
+    const expected_sel = style_selected ++ style_waiting ++ waiting_marker ++
+        sgr_reset ++ style_selected ++ "work1234" ++ (" " ** 12) ++ " x " ++ sgr_reset;
+    try std.testing.expectEqualStrings(expected_sel, out.items);
 }
 
 test "sidebar title row renders the title dim under the name" {
