@@ -83,7 +83,7 @@ Bindings follow GNU screen's defaults, including the `C-x` variants
 
 The prefix defaults to `Ctrl-a`. Set `BOO_PREFIX` to a different `Ctrl`+letter to change it (e.g. `BOO_PREFIX=C-b`, `^b`, or `b`); set it before `boo new` (for example in your shell rc), since a session keeps the prefix it was created with.
 
-`boo ui` adds additional keybinds for switching, resizing and hiding the sidebar, creating sessions, and killing them.
+`boo ui` adds additional keybinds for switching sessions, resizing and hiding the sidebar, creating and killing sessions, and splitting the view into tmux-like panes (`C-a |` / `C-a -`) navigated with `C-a` and the arrow keys. See `boo help ui` for the full list.
 
 ### Automation
 
@@ -177,8 +177,9 @@ your terminal <-(raw tty)-> boo client <-(unix socket)-> session daemon
 This is a young project, not a drop-in GNU screen replacement:
 
 - One attached client per session (attaching steals); no `-x` sharing.
-- One window per session: no splits or tabs inside a session. Run one
-  session per task and juggle them with `boo ui`.
+- A plain `boo attach` is one window per session: no splits or tabs.
+  `boo ui` tiles sessions into split panes (`C-a |`, `C-a -`), but each
+  pane is still a separate single-window session.
 - The prefix defaults to `C-a` and is chosen per session at creation
   time via `BOO_PREFIX`; pasted bytes containing the prefix byte (`0x01`
   by default) are interpreted as the prefix (GNU screen has the same
