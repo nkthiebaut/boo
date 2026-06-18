@@ -81,6 +81,8 @@ Bindings follow GNU screen's defaults, including the `C-x` variants
 | `C-a l`, `C-a C-l` | redraw                     |
 | `C-a a`   | send a literal `C-a`                |
 
+The prefix defaults to `Ctrl-a`. Set `BOO_PREFIX` to a different `Ctrl`+letter to change it (e.g. `BOO_PREFIX=C-b`, `^b`, or `b`); set it before `boo new` (for example in your shell rc), since a session keeps the prefix it was created with.
+
 `boo ui` adds additional keybinds for switching sessions, resizing and hiding the sidebar, creating and killing sessions, and splitting the view into tmux-like panes (`C-a |` / `C-a -`) navigated with `C-a` and the arrow keys. See `boo help ui` for the full list.
 
 ### Automation
@@ -178,9 +180,10 @@ This is a young project, not a drop-in GNU screen replacement:
 - A plain `boo attach` is one window per session: no splits or tabs.
   `boo ui` tiles sessions into split panes (`C-a |`, `C-a -`), but each
   pane is still a separate single-window session.
-- The `C-a` prefix is not yet configurable, and pasted bytes containing
-  `0x01` are interpreted as the prefix (GNU screen has the same quirk;
-  `boo ui` is immune thanks to bracketed paste).
+- The prefix defaults to `C-a` and is chosen per session at creation
+  time via `BOO_PREFIX`; pasted bytes containing the prefix byte (`0x01`
+  by default) are interpreted as the prefix (GNU screen has the same
+  quirk; `boo ui` is immune thanks to bracketed paste).
 - Sessions run with `TERM=xterm-256color`.
 
 ## Support
