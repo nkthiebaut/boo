@@ -27,6 +27,13 @@ pub const Window = struct {
     /// maintained by the daemon. Drives `wait --idle`.
     last_output_ms: i64,
 
+    /// The program rang the terminal bell (BEL) and no input has been
+    /// sent since. Coding agents (Claude Code, Codex, ...) ring the bell
+    /// when they finish a turn or need input/permission, so this is a
+    /// generic "waiting for input" signal the ui surfaces as a marker.
+    /// Set by the bell effect, cleared by `writeInput`.
+    waiting: bool = false,
+
     /// True while this window is the active window of an attached client.
     /// Controls whether query responses (DSR, DA, ...) are answered by
     /// the daemon or left to the client's real terminal.
@@ -89,7 +96,7 @@ pub const Window = struct {
         var handler: Stream.Handler = .init(&self.term);
         handler.effects = .{
             .write_pty = effectWritePty,
-            .bell = null,
+            .bell = effectBell,
             .color_scheme = null,
             .device_attributes = effectDeviceAttributes,
             .enquiry = null,
@@ -129,6 +136,15 @@ pub const Window = struct {
         protocol.writeAll(self.pty_fd, data) catch |err| {
             log.warn("window: failed writing query response: {}", .{err});
         };
+    }
+
+    /// BEL: the program wants attention. Agents ring it when a turn
+    /// ends or input is needed, so the window enters the "waiting"
+    /// state until the next input clears it. The bell still passes
+    /// through to an attached client's real terminal as output, so the
+    /// audible bell is unaffected; this only records the state.
+    fn effectBell(handler: *Stream.Handler) void {
+        fromHandler(handler).waiting = true;
     }
 
     // The device attributes response type is not re-exported by the
@@ -184,6 +200,9 @@ pub const Window = struct {
     pub fn writeInput(self: *Window, bytes: []const u8) !void {
         if (self.pty_fd < 0) return error.WindowDead;
         try protocol.writeAll(self.pty_fd, bytes);
+        // Input answers whatever the program was waiting for, so the
+        // attention marker clears until the next bell.
+        self.waiting = false;
     }
 
     pub fn resize(self: *Window, rows: u16, cols: u16) !void {
@@ -575,4 +594,76 @@ test "title set via OSC is tracked and emitted sanitized" {
     writer = std.Io.Writer.fixed(&buf);
     try writeTitle("a\x1b\x07b\x7f!", &writer);
     try std.testing.expectEqualStrings("\x1b]2;ab!\x07", writer.buffered());
+}
+
+/// Wire `win`'s stream with the real effects (bell included) so feed()
+/// exercises the attention marker. The handler keeps a pointer to
+/// `win.term` and fromHandler recovers the Window by @fieldParentPtr,
+/// so `win` must already sit at its final address (a stable local).
+fn wireTestWindow(win: *Window) void {
+    var handler: Window.Stream.Handler = .init(&win.term);
+    handler.effects = .{
+        .write_pty = null,
+        .bell = Window.effectBell,
+        .color_scheme = null,
+        .device_attributes = null,
+        .enquiry = null,
+        .size = null,
+        .title_changed = null,
+        .pwd_changed = null,
+        .xtversion = null,
+    };
+    win.stream = .initAlloc(win.alloc, handler);
+}
+
+test "a bell marks the window as waiting for input" {
+    const alloc = std.testing.allocator;
+    var win: Window = .{
+        .alloc = alloc,
+        .pty_fd = -1,
+        .child_pid = -1,
+        .command_title = "test",
+        .last_output_ms = 0,
+        .term = try vt.Terminal.init(alloc, .{ .cols = 20, .rows = 5 }),
+        .stream = undefined,
+    };
+    defer win.term.deinit(alloc);
+    wireTestWindow(&win);
+    defer win.stream.deinit();
+
+    // Ordinary output leaves the window idle.
+    win.feed("working...\r\n");
+    try std.testing.expect(!win.waiting);
+
+    // BEL (what an agent emits when it needs input) sets the marker.
+    win.feed("done\x07");
+    try std.testing.expect(win.waiting);
+}
+
+test "input clears the waiting marker" {
+    const alloc = std.testing.allocator;
+    var win: Window = .{
+        .alloc = alloc,
+        .pty_fd = -1,
+        .child_pid = -1,
+        .command_title = "test",
+        .last_output_ms = 0,
+        .term = try vt.Terminal.init(alloc, .{ .cols = 20, .rows = 5 }),
+        .stream = undefined,
+    };
+    defer win.term.deinit(alloc);
+    wireTestWindow(&win);
+    defer win.stream.deinit();
+
+    // A pipe stands in for the pty so writeInput has somewhere to go.
+    const fds = try posix.pipe();
+    defer posix.close(fds[0]);
+    win.pty_fd = fds[1];
+    defer posix.close(fds[1]);
+
+    win.feed("\x07");
+    try std.testing.expect(win.waiting);
+
+    try win.writeInput("y\r");
+    try std.testing.expect(!win.waiting);
 }

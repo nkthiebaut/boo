@@ -173,7 +173,53 @@ const Harness = struct {
             };
         }
     }
+
+    /// Poll `ls --json` until the session's "waiting" flag equals want.
+    fn waitWaiting(self: *Harness, session: []const u8, want: bool) !void {
+        var deadline = Deadline.init(default_timeout_ms);
+        while (true) {
+            const ls = try self.run(&.{ "ls", "--json" });
+            defer self.alloc.free(ls.stdout);
+            defer self.alloc.free(ls.stderr);
+            if (ls.term == .Exited and ls.term.Exited == 0) {
+                if (jsonWaiting(self.alloc, ls.stdout, session)) |w| {
+                    if (w == want) return;
+                }
+            }
+            deadline.tick("waiting flag never reached the wanted value") catch |err| {
+                std.debug.print("--- last ls --json ---\n{s}\n---\n", .{ls.stdout});
+                return err;
+            };
+        }
+    }
 };
+
+/// The "waiting" flag for `session` in a `boo ls --json` array, or null
+/// when the session or field is absent or the JSON does not parse.
+fn jsonWaiting(alloc: std.mem.Allocator, json: []const u8, session: []const u8) ?bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json, .{}) catch return null;
+    defer parsed.deinit();
+    const arr = switch (parsed.value) {
+        .array => |a| a,
+        else => return null,
+    };
+    for (arr.items) |item| {
+        const obj = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+        const name = switch (obj.get("name") orelse continue) {
+            .string => |s| s,
+            else => continue,
+        };
+        if (!std.mem.eql(u8, name, session)) continue;
+        return switch (obj.get("waiting") orelse return null) {
+            .bool => |b| b,
+            else => null,
+        };
+    }
+    return null;
+}
 
 const Deadline = struct {
     end: i64,
@@ -1030,7 +1076,27 @@ test "ls emits machine-readable JSON" {
         try std.testing.expectEqual(false, obj.get("attached").?.bool);
         try std.testing.expect(obj.get("idle_ms").?.integer >= 0);
         try std.testing.expectEqualStrings("cat", obj.get("title").?.string);
+        // A fresh session has not rung the bell.
+        try std.testing.expectEqual(false, obj.get("waiting").?.bool);
     }
+}
+
+test "ls --json reports a session waiting for input after a bell" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // The session rings the terminal bell (what a coding agent does
+    // when it finishes a turn or needs input), then idles so the
+    // daemon stays alive for the queries below.
+    try h.startDetached("bell", &.{ "sh", "-c", "printf '\\a'; sleep 30" });
+
+    // The bell flips the waiting flag on.
+    try h.waitWaiting("bell", true);
+
+    // Sending input answers the prompt and clears the flag.
+    try h.sendLine("bell", "");
+    try h.waitWaiting("bell", false);
 }
 
 test "peek --json includes geometry, cursor, and screen content" {
@@ -1416,6 +1482,24 @@ test "ui: sidebar lists sessions and the focused session renders in the viewport
     try ui.waitFor("AA-TYPED-MARK");
     const peeked = try h.waitPeekContains("aa", "AA-TYPED-MARK");
     defer alloc.free(peeked);
+}
+
+test "ui: a session waiting for input is marked in the sidebar" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(alloc);
+    defer h.deinit();
+
+    // A session that rings the bell, then idles. The daemon observes
+    // the bell even though no client is attached yet.
+    try h.startDetached("bell", &.{ "sh", "-c", "printf '\\a'; sleep 30" });
+    try h.waitWaiting("bell", true);
+
+    var ui = try PtyClient.spawn(&h, &.{"ui"}, 24, 100);
+    defer ui.deinit();
+    try ui.waitFor("bell");
+    // The sidebar marks the waiting session with the ● glyph once the
+    // periodic refresh picks up the daemon's waiting flag.
+    try ui.waitFor("\u{25CF}");
 }
 
 test "ui: dragging in the viewport selects text and copies it via osc 52" {
